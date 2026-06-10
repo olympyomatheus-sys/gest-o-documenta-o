@@ -1,7 +1,6 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
-<head><base href="https://d16ilfvy4mv02r.cloudfront.net/workspaces/QNzxSs7S5uDuU02M70YCW0u2nmylGReK/6e1c10e2-06bb-43bc-9f1d-517fc2b90c58/files/">
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>G&D Sistema – GRUPO GPS</title>
@@ -837,16 +836,161 @@ let editingType = null;
 let charts = {};
 
 // Load from localStorage
-function loadDB() {
+// ═══════════════════════════════════════════════════════
+// SUPABASE CONFIG
+// ═══════════════════════════════════════════════════════
+const SUPA_URL = 'https://opqkejhxwozfklglqchq.supabase.co';
+const SUPA_KEY = 'sb_publishable_r6_IG4slOkBKUQO8TEFVcw_zLUPDGHc';
+
+async function supaFetch(path, method='GET', body=null) {
+  const opts = {
+    method,
+    headers: {
+      'apikey': SUPA_KEY,
+      'Authorization': 'Bearer ' + SUPA_KEY,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'return=representation' : ''
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(SUPA_URL + '/rest/v1/' + path, opts);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error('Supabase error: ' + err);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
+
+// mapeamento snake_case → camelCase
+function rowToPend(r) {
+  return {
+    _id: r.id, mrh: r.mrh, funcao: r.funcao, cr: r.cr,
+    limiteRecrutamento: r.limite_recrutamento, inicioContrato: r.inicio_contrato,
+    gerente: r.gerente, recrutador: r.recrutador, cpf: r.cpf, nome: r.nome,
+    whatsapp: r.whatsapp, aso: r.aso, tipoAso: r.tipo_aso,
+    respDoc: r.resp_doc, docsPendentes: r.docs_pendentes,
+    justificativa: r.justificativa, _importedAt: r.imported_at
+  };
+}
+function rowToEnv(r) {
+  return {
+    _id: r.id, mrh: r.mrh, funcao: r.funcao, cr: r.cr,
+    inicioContrato: r.inicio_contrato, admissao: r.admissao,
+    finalizacaoRH: r.finalizacao_rh, gerente: r.gerente, recrutador: r.recrutador,
+    cpf: r.cpf, nome: r.nome, whatsapp: r.whatsapp, aso: r.aso, tipoAso: r.tipo_aso,
+    respDoc: r.resp_doc, docsPendentes: r.docs_pendentes, status: r.status,
+    justificativa: r.justificativa, avisado: r.avisado, _importedAt: r.imported_at
+  };
+}
+function rowToLog(r) {
+  return { dt: r.data, tipo: r.arquivo.includes('nviad') ? 'Enviados' : 'Pendentes', filename: r.arquivo, novas: r.pendentes, dups: 0, total: r.enviados };
+}
+function pendToRow(r) {
+  return {
+    mrh: r.mrh, funcao: r.funcao, cr: r.cr,
+    limite_recrutamento: r.limiteRecrutamento || null,
+    inicio_contrato: r.inicioContrato || null,
+    gerente: r.gerente, recrutador: r.recrutador, cpf: r.cpf, nome: r.nome,
+    whatsapp: r.whatsapp, aso: r.aso, tipo_aso: r.tipoAso,
+    resp_doc: r.respDoc, docs_pendentes: r.docsPendentes,
+    justificativa: r.justificativa || '', imported_at: r._importedAt || today()
+  };
+}
+function envToRow(r) {
+  return {
+    mrh: r.mrh, funcao: r.funcao, cr: r.cr,
+    inicio_contrato: r.inicioContrato || null,
+    admissao: r.admissao || null, finalizacao_rh: r.finalizacaoRH || null,
+    gerente: r.gerente, recrutador: r.recrutador, cpf: r.cpf, nome: r.nome,
+    whatsapp: r.whatsapp, aso: r.aso, tipo_aso: r.tipoAso,
+    resp_doc: r.respDoc, docs_pendentes: r.docsPendentes,
+    status: r.status, justificativa: r.justificativa || '',
+    avisado: r.avisado || false, imported_at: r._importedAt || today()
+  };
+}
+
+async function loadDB() {
   try {
-    const saved = localStorage.getItem('gpso_db_v2');
-    if (saved) DB = JSON.parse(saved);
-  } catch(e){}
+    showLoadingOverlay(true);
+    const [pend, env, logs] = await Promise.all([
+      supaFetch('pendentes?order=created_at.desc'),
+      supaFetch('enviados?order=created_at.desc'),
+      supaFetch('import_log?order=created_at.desc&limit=50')
+    ]);
+    DB.pendentes  = pend.map(rowToPend);
+    DB.enviados   = env.map(rowToEnv);
+    DB.importLog  = logs.map(r => ({
+      dt: new Date(r.created_at).toLocaleString('pt-BR'),
+      tipo: r.arquivo,
+      filename: r.arquivo,
+      novas: r.pendentes,
+      dups: 0,
+      total: r.enviados
+    }));
+  } catch(e) {
+    console.error('loadDB error', e);
+    toast('Erro ao carregar dados: ' + e.message, 'error');
+  } finally {
+    showLoadingOverlay(false);
+  }
 }
-function saveDB() {
-  try { localStorage.setItem('gpso_db_v2', JSON.stringify(DB)); } catch(e){}
+
+async function saveDB() {
+  // saveDB não é mais usada diretamente — cada operação usa sua própria função async
 }
-loadDB();
+
+// ─── INSERT pendente
+async function dbInsertPendente(r) {
+  const rows = await supaFetch('pendentes', 'POST', pendToRow(r));
+  if (rows && rows[0]) r._id = rows[0].id;
+  return r;
+}
+// ─── INSERT enviado
+async function dbInsertEnviado(r) {
+  const rows = await supaFetch('enviados', 'POST', envToRow(r));
+  if (rows && rows[0]) r._id = rows[0].id;
+  return r;
+}
+// ─── UPDATE pendente
+async function dbUpdatePendente(r) {
+  await supaFetch('pendentes?id=eq.' + r._id, 'PATCH', pendToRow(r));
+}
+// ─── UPDATE enviado
+async function dbUpdateEnviado(r) {
+  await supaFetch('enviados?id=eq.' + r._id, 'PATCH', envToRow(r));
+}
+// ─── UPDATE avisado
+async function dbToggleAvisado(id, val) {
+  await supaFetch('enviados?id=eq.' + id, 'PATCH', { avisado: val });
+}
+// ─── DELETE all
+async function dbClearAll() {
+  await Promise.all([
+    supaFetch('pendentes?id=neq.00000000-0000-0000-0000-000000000000', 'DELETE'),
+    supaFetch('enviados?id=neq.00000000-0000-0000-0000-000000000000', 'DELETE'),
+    supaFetch('import_log?id=neq.00000000-0000-0000-0000-000000000000', 'DELETE')
+  ]);
+}
+// ─── INSERT log
+async function dbInsertLog(arquivo, pendentes, enviados) {
+  await supaFetch('import_log', 'POST', {
+    arquivo, pendentes, enviados,
+    data: new Date().toLocaleString('pt-BR')
+  });
+}
+
+function showLoadingOverlay(show) {
+  let el = document.getElementById('loading-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'loading-overlay';
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(10,36,99,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)';
+    el.innerHTML = '<div style="background:#fff;border-radius:16px;padding:32px 40px;text-align:center;box-shadow:0 8px 32px rgba(10,36,99,0.25)"><div style="font-size:36px;margin-bottom:12px">⏳</div><div style="font-size:15px;font-weight:700;color:#0A2463">Carregando dados...</div><div style="font-size:12px;color:#9FAEC3;margin-top:4px">Conectando ao Supabase</div></div>';
+    document.body.appendChild(el);
+  }
+  el.style.display = show ? 'flex' : 'none';
+}
 
 // ═══════════════════════════════════════════════════════
 // NAV
@@ -963,18 +1107,23 @@ function mapRow(row) {
   };
 }
 
-function importPendentes(rows, filename) {
+async function importPendentes(rows, filename) {
   let novas = 0, dups = 0;
-  rows.forEach(row => {
+  showStatus('pendentes', 'ok', '⏳ Importando...');
+  for (const row of rows) {
     const m = mapRow(row);
-    if (!m.mrh && !m.cpf) return;
+    if (!m.mrh && !m.cpf) continue;
     const exists = DB.pendentes.some(p => p.mrh === m.mrh && p.cpf === m.cpf);
     if (!exists) {
-      DB.pendentes.push({ ...m, _id: uid(), _importedAt: today(), justificativa: '' });
-      novas++;
+      const rec = { ...m, _id: uid(), _importedAt: today(), justificativa: '' };
+      try {
+        await dbInsertPendente(rec);
+        DB.pendentes.push(rec);
+        novas++;
+      } catch(e) { console.error('insert pendente err', e); }
     } else { dups++; }
-  });
-  saveDB();
+  }
+  try { await dbInsertLog(filename, novas, rows.length); } catch(e){}
   populateFilters();
   filterTable('pendentes');
   renderDashboard();
@@ -983,25 +1132,26 @@ function importPendentes(rows, filename) {
   toast(`${novas} candidatos pendentes importados com sucesso!`, 'success');
 }
 
-function importEnviados(rows, filename) {
+async function importEnviados(rows, filename) {
   let novas = 0, ignorados = 0, dups = 0;
-  rows.forEach(row => {
+  showStatus('enviados', 'ok', '⏳ Importando...');
+  for (const row of rows) {
     const m = mapRow(row);
     const admissao = parseDate(row['ADMISSAO'] || row['Admissão'] || row['admissao'] || row['ADMISSÃO'] || '');
     const finalizacaoRH = parseDate(row['FINALIZACAO_RH'] || row['FINALIZAÇÃO RH'] || row['FINALIZACAO RH'] || row['finalizacao_rh'] || '');
-    
-    // Cross-reference: only process if MRH+CPF exists in pendentes
     const pendRef = DB.pendentes.find(p => p.mrh === m.mrh && p.cpf === m.cpf);
-    if (!pendRef) { ignorados++; return; }
-    
+    if (!pendRef) { ignorados++; continue; }
     const exists = DB.enviados.some(e => e.mrh === m.mrh && e.cpf === m.cpf);
-    if (exists) { dups++; return; }
-    
+    if (exists) { dups++; continue; }
     const status = calcStatus(m.inicioContrato, finalizacaoRH);
-    DB.enviados.push({ ...m, admissao, finalizacaoRH, status: status || 'Pendente', _id: uid(), _importedAt: today(), justificativa: '' });
-    novas++;
-  });
-  saveDB();
+    const rec = { ...m, admissao, finalizacaoRH, status: status || 'Pendente', _id: uid(), _importedAt: today(), justificativa: '' };
+    try {
+      await dbInsertEnviado(rec);
+      DB.enviados.push(rec);
+      novas++;
+    } catch(e) { console.error('insert enviado err', e); }
+  }
+  try { await dbInsertLog(filename, novas, rows.length); } catch(e){}
   populateFilters();
   filterTable('enviados');
   renderDashboard();
@@ -1662,7 +1812,7 @@ function openEdit(id, type) {
   document.getElementById('modal-overlay').classList.add('open');
 }
 function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); editingId=null; }
-function saveEdit() {
+async function saveEdit() {
   const r = DB[editingType].find(x=>x._id===editingId);
   if (!r) return;
   if (r.status === 'Em Atraso' && !document.getElementById('m-justif').value.trim()) {
@@ -1677,7 +1827,6 @@ function saveEdit() {
   const diasEl = document.getElementById('m-aso-dias');
   r.asoDias = diasEl.value;
   r.asoObs = document.getElementById('m-aso-obs').value;
-  // Derivar status ASO dos dias
   r.aso = diasEl.value === '2' ? 'OK' : 'Pendente';
   r.respDoc = document.getElementById('m-resp').value;
   r.docsPendentes = document.getElementById('m-docs').value;
@@ -1686,11 +1835,16 @@ function saveEdit() {
   r.justificativa = document.getElementById('m-justif').value;
   r.justificativaPend = document.getElementById('m-justif-pend').value;
   if (r.finalizacaoRH) r.status = calcStatus(r.inicioContrato, r.finalizacaoRH) || r.status;
-  saveDB();
-  closeModal();
-  filterTable(editingType);
-  renderDashboard();
-  toast('Alterações salvas com sucesso!', 'success');
+  try {
+    if (editingType === 'pendentes') await dbUpdatePendente(r);
+    else await dbUpdateEnviado(r);
+    closeModal();
+    filterTable(editingType);
+    renderDashboard();
+    toast('Alterações salvas com sucesso!', 'success');
+  } catch(e) {
+    toast('Erro ao salvar: ' + e.message, 'error');
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1900,18 +2054,22 @@ function exportPDF() {
 function confirmClearAll() {
   document.getElementById('confirm-overlay').classList.add('open');
 }
-function clearAllData() {
-  DB.pendentes = [];
-  DB.enviados = [];
-  DB.importLog = [];
-  saveDB();
-  document.getElementById('confirm-overlay').classList.remove('open');
-  renderDashboard();
-  populateFilters();
-  filterTable('pendentes');
-  filterTable('enviados');
-  renderImportLog();
-  toast('Todos os dados foram apagados.', 'warning');
+async function clearAllData() {
+  try {
+    await dbClearAll();
+    DB.pendentes = [];
+    DB.enviados = [];
+    DB.importLog = [];
+    document.getElementById('confirm-overlay').classList.remove('open');
+    renderDashboard();
+    populateFilters();
+    filterTable('pendentes');
+    filterTable('enviados');
+    renderImportLog();
+    toast('Todos os dados foram apagados.', 'warning');
+  } catch(e) {
+    toast('Erro ao apagar dados: ' + e.message, 'error');
+  }
 }
 
 // ─── ASO TIP
@@ -1927,13 +2085,18 @@ function updateAsoTip() {
 }
 
 // ─── TOGGLE AVISADO
-function toggleAvisado(id) {
+async function toggleAvisado(id) {
   const r = DB.enviados.find(x=>x._id===id);
   if(!r) return;
   r.avisado = !r.avisado;
-  saveDB();
-  filterTable('enviados');
-  toast(r.avisado ? '✅ Candidato marcado como avisado!' : 'Aviso removido.', r.avisado?'success':'info');
+  try {
+    await dbToggleAvisado(id, r.avisado);
+    filterTable('enviados');
+    toast(r.avisado ? '✅ Candidato marcado como avisado!' : 'Aviso removido.', r.avisado?'success':'info');
+  } catch(e) {
+    r.avisado = !r.avisado; // reverter
+    toast('Erro ao atualizar: ' + e.message, 'error');
+  }
 }
 const DOCS_GERAIS = [
   'Foto para o crachá','RG (frente e verso)','CPF','Comprovante de residência',
@@ -2038,9 +2201,13 @@ function seedDemo() {
 // ═══════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadDB();
+  renderDashboard();
+  populateFilters();
+  filterTable('pendentes');
+  filterTable('enviados');
   renderImportLog();
-  seedDemo();
 });
 </script>
 </body>
